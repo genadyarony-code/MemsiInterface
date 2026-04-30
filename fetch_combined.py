@@ -6,6 +6,7 @@ from dateutil.relativedelta import relativedelta
 from pricing_data import get_repair_price, is_repair_item, get_replacement_price
 from product_identification import identify_luggage
 from cache_manager import CacheManager
+from logger import logger
 
 import os
 from pathlib import Path
@@ -43,7 +44,7 @@ def fetch_documents(start_date, end_date):
 
     response = requests.get(DOCUMENTS_URL, headers=headers, params=params, timeout=30)
     if response.status_code != 200:
-        print(f"Error fetching documents: {response.text}")
+        logger.error("fetch_documents HTTP %s: %s", response.status_code, response.text[:300])
         return []
 
     data = response.json()
@@ -59,7 +60,7 @@ def fetch_logfile(start_date, end_date):
 
     response = requests.get(LOGFILE_URL, headers=headers, params=params, timeout=30)
     if response.status_code != 200:
-        print(f"Error fetching logfile: {response.text}")
+        logger.error("fetch_logfile HTTP %s: %s", response.status_code, response.text[:300])
         return []
     
     data = response.json()
@@ -84,7 +85,7 @@ def fetch_with_cache(start_date, end_date):
         month_start = f"{year}-{month:02d}-01"
         month_end = f"{year}-{month:02d}-{last_day}"
         
-        print(f"  Fetching from API: {year_month}")
+        logger.info("fetch_with_cache: pulling %s from API", year_month)
         
         if year_month in missing_docs:
             docs = fetch_documents(month_start, month_end)
@@ -97,7 +98,7 @@ def fetch_with_cache(start_date, end_date):
             cache.update_metadata('logfile', year_month, month_start, month_end, len(logs))
     
     # שליפה מ-cache
-    print(f"  Loading from cache: {start_date} to {end_date}")
+    logger.debug("fetch_with_cache: loading from cache %s → %s", start_date, end_date)
     documents = cache.get_documents(start_date, end_date)
     logfile = cache.get_logfile(start_date, end_date)
     

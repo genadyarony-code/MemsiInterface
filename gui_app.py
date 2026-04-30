@@ -13,6 +13,7 @@ from pricing_data import *
 from product_identification import LUGGAGE_IDENTIFICATION
 from inventory_analysis import filter_by_attributes
 from forecast_tab import ForecastTab
+from logger import logger
 import pandas as pd
 
 # ════════════════════════════════════════════════
@@ -77,6 +78,29 @@ class MultiMonthReportWorker(QThread):
             self.finished.emit(sheets)
         except Exception as e:
             import traceback; self.error.emit(traceback.format_exc())
+
+
+class HealthCheckWorker(QThread):
+    """בדיקת זמינות Priority API ברקע."""
+    finished = pyqtSignal(bool, str)   # (ok, message)
+
+    def run(self):
+        try:
+            import os, requests
+            from pathlib import Path
+            from dotenv import load_dotenv
+            load_dotenv(Path(__file__).parent / '.env')
+            base = os.environ.get('PRIORITY_BASE_URL',
+                                  'https://priority.newcinema.co.il/odata/Priority/tabula.ini/ncinema')
+            auth = os.environ.get('PRIORITY_AUTH_HEADER', '')
+            r = requests.get(base, headers={"Authorization": auth}, timeout=8)
+            ok = r.status_code < 500
+            msg = f"Priority API: HTTP {r.status_code}"
+            logger.info("health_check API: %s", msg)
+            self.finished.emit(ok, msg)
+        except Exception as e:
+            logger.warning("health_check API failed: %s", e)
+            self.finished.emit(False, str(e))
 
 
 class ReportGeneratorTab(QWidget):
@@ -1302,7 +1326,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.init_ui()
-    
+        self._run_health_checks()
+
     def init_ui(self):
         self.setWindowTitle("מערכת דיווח חיובים ותשלומים - Priority Interface")
         self.setGeometry(100, 100, 1100, 750)
@@ -1337,18 +1362,74 @@ class MainWindow(QMainWindow):
         tabs.addTab(ForecastTab(), "תחזיות")
         tabs.addTab(UpdatesTab(), "עדכונים")
 
-        footer = QLabel("נכתב על ידי ירון גנד עבור תמוז סחר")
-        footer.setAlignment(Qt.AlignCenter)
-        footer.setStyleSheet("font-size: 11px; color: #7f8c8d; padding: 4px; background-color: #ecf0f1; border-top: 1px solid #bdc3c7;")
+        # ── שורת סטטוס תחתית ──
+        footer_bar = QWidget()
+        footer_bar.setStyleSheet("background-color: #ecf0f1; border-top: 1px solid #bdc3c7;")
+        footer_layout = QHBoxLayout(footer_bar)
+        footer_layout.setContentsMargins(8, 2, 8, 2)
+
+        self._db_dot   = QLabel("●")
+        self._api_dot  = QLabel("●")
+        self._db_lbl   = QLabel("DB: בדיקה…")
+        self._api_lbl  = QLabel("Priority API: בדיקה…")
+        dot_style = "font-size: 10px; color: #f39c12;"
+        txt_style = "font-size: 11px; color: #7f8c8d;"
+        for w in (self._db_dot, self._api_dot):
+            w.setStyleSheet(dot_style)
+        for w in (self._db_lbl, self._api_lbl):
+            w.setStyleSheet(txt_style)
+
+        footer_layout.addWidget(self._db_dot)
+        footer_layout.addWidget(self._db_lbl)
+        footer_layout.addSpacing(16)
+        footer_layout.addWidget(self._api_dot)
+        footer_layout.addWidget(self._api_lbl)
+        footer_layout.addStretch()
+
+        credit = QLabel("נכתב על ידי ירון גנד עבור תמוז סחר")
+        credit.setStyleSheet("font-size: 11px; color: #7f8c8d;")
+        footer_layout.addWidget(credit)
 
         central = QWidget()
         central_layout = QVBoxLayout()
         central_layout.setContentsMargins(0, 0, 0, 0)
         central_layout.setSpacing(0)
         central_layout.addWidget(tabs)
-        central_layout.addWidget(footer)
+        central_layout.addWidget(footer_bar)
         central.setLayout(central_layout)
         self.setCentralWidget(central)
+
+    def _run_health_checks(self):
+        # DB — סנכרוני (חסימה קצרה בהפעלה, כשל = אזהרה קריטית)
+        try:
+            import psycopg2
+            from db_config import DB_CONFIG
+            conn = psycopg2.connect(**DB_CONFIG, connect_timeout=5)
+            conn.close()
+            self._set_status(self._db_dot, self._db_lbl, True, "DB: מחובר")
+            logger.info("health_check DB: OK")
+        except Exception as e:
+            self._set_status(self._db_dot, self._db_lbl, False, f"DB: {str(e)[:60]}")
+            logger.error("health_check DB failed: %s", e)
+            QMessageBox.critical(
+                self, "שגיאת חיבור",
+                f"לא ניתן להתחבר למסד הנתונים:\n{e}\n\nהתוכנה תפעל במצב מוגבל.",
+            )
+
+        # Priority API — אסינכרוני (לא חוסם)
+        self._api_worker = HealthCheckWorker()
+        self._api_worker.finished.connect(self._on_api_health)
+        self._api_worker.start()
+
+    def _on_api_health(self, ok, msg):
+        self._set_status(self._api_dot, self._api_lbl, ok, f"Priority: {'מחובר' if ok else msg[:50]}")
+
+    @staticmethod
+    def _set_status(dot: QLabel, lbl: QLabel, ok: bool, text: str):
+        color = "#27ae60" if ok else "#e74c3c"
+        dot.setStyleSheet(f"font-size: 10px; color: {color};")
+        lbl.setStyleSheet(f"font-size: 11px; color: {color};")
+        lbl.setText(text)
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)

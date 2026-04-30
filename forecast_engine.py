@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 from dateutil.relativedelta import relativedelta
 from datetime import datetime
+from logger import logger
 
 warnings.filterwarnings('ignore')
 
@@ -350,6 +351,7 @@ def run_all_models(series: pd.Series, horizon: int,
     """
     results = {}
 
+    logger.info("run_all_models: n=%d horizon=%d context=%s", len(series), horizon, context)
     print("  מריץ ARIMA...")
     results['arima']   = forecast_arima(series, horizon, events_df, context)
 

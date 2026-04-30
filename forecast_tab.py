@@ -1005,6 +1005,27 @@ class ForecastTab(QWidget):
         self.sea_chart.plot(hist, self._make_title(
             self._sel_labels_last, cats, self._get_horizon()))
 
+    def _validate_forecast_data(self, results: dict) -> list[str]:
+        """מחזיר רשימת אזהרות על ערכים חריגים בתחזיות."""
+        warnings = []
+        hist_max = float(self._series.max()) if len(self._series) else 0
+        hist_last = float(self._series.iloc[-1]) if len(self._series) else 0
+
+        for model in ('arima', 'prophet', 'xgboost'):
+            df = results.get(model)
+            if df is None or df.empty:
+                continue
+            for _, row in df.iterrows():
+                val = float(row.get('forecast', 0))
+                ym  = row.get('year_month', '?')
+                if val < 0:
+                    warnings.append(f"{model.upper()} {ym}: ערך שלילי ({val:.0f})")
+                if hist_last > 0 and val > hist_last * 3:
+                    warnings.append(f"{model.upper()} {ym}: קפיצה של מעל 300% מהחודש הקודם ({val:.0f})")
+                if hist_max > 0 and val > hist_max * 5:
+                    warnings.append(f"{model.upper()} {ym}: מעל פי 5 מהמקסימום ההיסטורי ({val:.0f} > {hist_max*5:.0f})")
+        return warnings
+
     def _on_forecast_done(self, results):
         self._results = results
         self.run_btn.setEnabled(True)
@@ -1017,6 +1038,15 @@ class ForecastTab(QWidget):
         self._fill_nv(results.get('newsvendor', {}))
         self._fill_desc(results.get('descriptions', {}))
         self.status_label.setText("הושלם ✓")
+
+        issues = self._validate_forecast_data(results)
+        if issues:
+            from logger import logger
+            logger.warning("forecast validation: %d issues: %s", len(issues), issues)
+            QMessageBox.warning(
+                self, "אזהרת תחזית",
+                "זוהו ערכים חריגים בתחזית:\n\n" + "\n".join(f"• {w}" for w in issues[:10]),
+            )
 
     def _on_error(self, tb):
         self.run_btn.setEnabled(True); self.proc_btn.setEnabled(True)
