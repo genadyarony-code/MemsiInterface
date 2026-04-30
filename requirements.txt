@@ -1,0 +1,7 @@
+pandas
+openpyxl
+requests
+psycopg2-binary
+python-dateutil
+PyQt5
+python-dateutil
