@@ -8,8 +8,8 @@ from product_identification import identify_luggage
 from cache_manager import CacheManager
 
 AUTH_HEADER = ""
-DOCUMENTS_URL = "https://priority.newcinema.co.il/odata/Priority/tabula.ini/ncinema/DOCUMENTS_D"
-LOGFILE_URL = "https://priority.newcinema.co.il/odata/Priority/tabula.ini/ncinema/LOGFILE"
+DOCUMENTS_URL = "https://priority.new.co.il/odata/Priority/tabula.ini/ncinema/DOCUMENTS_D"
+LOGFILE_URL = "https://priority.new.co.il/odata/Priority/tabula.ini/ncinema/LOGFILE"
 
 TARGET_CUSTOMERS = [
     '360010009', '360010035', '360250034', '360250041', '360040004',
