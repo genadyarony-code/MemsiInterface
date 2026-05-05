@@ -34,7 +34,7 @@ def _styled_table(headers: list[str], header_bg: str = '#2c3e50') -> QTableWidge
     t.setStyleSheet(
         "QTableWidget{font-size:12px;}"
         f"QHeaderView::section{{font-weight:bold;background:{header_bg};"
-        "color:white;padding:4px;}}"
+        "color:white;padding:4px;}"
     )
     return t
 
