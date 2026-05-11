@@ -438,7 +438,7 @@ class ForecastTab(QWidget):
         gb_h = QGroupBox("אופק תחזית")
         gh   = QVBoxLayout(gb_h)
         self.horizon_combo = QComboBox()
-        self.horizon_combo.addItems(["חודש הבא (1)","3 חודשים","6 חודשים","12 חודשים"])
+        self.horizon_combo.addItems(["חודש הבא (1)","3 חודשים","6 חודשים","9 חודשים","12 חודשים"])
         self.horizon_combo.setCurrentIndex(2)
         gh.addWidget(self.horizon_combo); lv.addWidget(gb_h)
 
@@ -778,7 +778,8 @@ class ForecastTab(QWidget):
     #  עזרים
     # ────────────────────────────────────────────
     def _get_horizon(self) -> int:
-        return {"חודש הבא (1)":1,"3 חודשים":3,"6 חודשים":6,"12 חודשים":12}.get(
+        return {"חודש הבא (1)":1,"3 חודשים":3,"6 חודשים":6,
+                "9 חודשים":9,"12 חודשים":12}.get(
             self.horizon_combo.currentText(), 6)
 
     def _build_context(self) -> dict:

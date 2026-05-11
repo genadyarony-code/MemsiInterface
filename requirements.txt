@@ -13,3 +13,4 @@ scipy
 python-bidi
 python-dotenv
 tenacity
+pyluach

@@ -37,9 +37,16 @@ def _ensure_dir():
 
 def _key(model: str, series: pd.Series, horizon: int,
          events_df: pd.DataFrame, context: dict) -> str:
-    """hash דטרמיניסטי של הקלטים."""
+    """hash דטרמיניסטי של הקלטים.
+
+    כולל גם MODEL_VERSION כך ששינוי לוגיקה בקוד המודל יבטל cache אוטומטית
+    (אחרת ה-app היה מחזיר תוצאות-pickle מ-לוגיקה ישנה אחרי עדכון).
+    """
+    from forecast_engine import MODEL_VERSION
+
     h = hashlib.sha256()
     h.update(model.encode())
+    h.update(MODEL_VERSION.encode())
     h.update(str(horizon).encode())
 
     # series - index (ym) + values בעיגול ל-2 ספרות

@@ -23,6 +23,18 @@ warnings.filterwarnings('ignore')
 
 
 # ────────────────────────────────────────────────
+#  MODEL_VERSION — נכלל ב-cache key.
+#  להגדיל בכל שינוי בלוגיקת מודל, ב-features, או באלגוריתם residual std.
+#  שינוי הערך הזה גורם לכל ה-cache הקיים להיחשב לא-תקף, וה-app יחשב מחדש.
+#  היסטוריה:
+#    "1" - גרסה התחלתית.
+#    "2" - C1: הסרת is_routine מ-Prophet, פישוט features ב-XGBoost,
+#          rolling residual std (12 חודשים), טעינת חגים דינמית מ-pyluach.
+# ────────────────────────────────────────────────
+MODEL_VERSION = "2"
+
+
+# ────────────────────────────────────────────────
 #  עזרים משותפים
 # ────────────────────────────────────────────────
 
@@ -35,11 +47,19 @@ def _extend_events(events_df: pd.DataFrame, last_ym: str,
     נמצא בעבר, חלון ה-horizon של ה-backtest נופל על חודשים שיש להם נתוני-עבר
     ב-events_df. בלי הסינון, ה-context-default היה דורס את העובדות ההיסטוריות
     ופוגם ב-metrics.
+
+    jewish_holiday מחושב דינמית מ-pyluach לחודשים עתידיים; ה-context יכול
+    לעקוף אם המשתמש סיפק ערך מפורש.
     """
+    from holiday_calendar import get_jewish_holiday_months
+
     existing_yms = (set(events_df['year_month'].astype(str))
                     if 'year_month' in events_df.columns else set())
     rows = []
     cur = datetime.strptime(last_ym + "-01", "%Y-%m-%d")
+    # חישוב חד-פעמי של חודשי-חג בטווח הרלוונטי, חוסך קריאות חוזרות.
+    end = cur + relativedelta(months=horizon)
+    holiday_months = get_jewish_holiday_months(cur.year, end.year)
     for _ in range(horizon):
         cur = (cur + relativedelta(months=1))
         ym  = cur.strftime("%Y-%m")
@@ -48,12 +68,15 @@ def _extend_events(events_df: pd.DataFrame, last_ym: str,
         _w = int(context.get('is_war', 0))
         _o = int(context.get('is_military_op', 0))
         _c = int(context.get('is_ceasefire', 0))
+        # ה-context יכול לעקוף, אבל ברירת המחדל היא חישוב דינמי מהלוח-העברי.
+        _jh = int(context['jewish_holiday']) if 'jewish_holiday' in context \
+              else (1 if ym in holiday_months else 0)
         rows.append({
             'year_month':      ym,
             'is_war':          _w,
             'is_military_op':  _o,
             'is_ceasefire':    _c,
-            'jewish_holiday':  int(context.get('jewish_holiday', 0)),
+            'jewish_holiday':  _jh,
             'season':          int(context.get('season', _infer_season(ym))),
             'is_summer_peak':  int(context.get('is_summer_peak',
                                                1 if cur.month in (7, 8) else 0)),
@@ -151,9 +174,7 @@ def forecast_prophet(series: pd.Series, horizon: int,
     all_ev   = _extend_events(events_df, series.index[-1], horizon, context)
     ev_idx   = all_ev.drop_duplicates(subset='year_month', keep='last').set_index('year_month')
 
-    # חישוב עמודות נגזרות אם חסרות
-    if 'is_routine' not in all_ev.columns:
-        all_ev['is_routine'] = (1 - (all_ev['is_war'] + all_ev['is_military_op'] + all_ev['is_ceasefire']).clip(0, 1)).astype(float)
+    # חישוב עמודות נגזרות אם חסרות (is_routine הוסר מ-regressors ב-C1, ראה הערה למטה)
     if 'is_black_friday' not in all_ev.columns:
         all_ev['is_black_friday'] = all_ev['year_month'].str[5:7].astype(int).eq(11).astype(float)
 
@@ -182,13 +203,17 @@ def forecast_prophet(series: pd.Series, horizon: int,
     df_train = df_train.merge(
         all_ev[['year_month','is_war','is_military_op',
                 'is_ceasefire','jewish_holiday','is_summer_peak',
-                'is_routine','is_black_friday']],
+                'is_black_friday']],
         left_on='ym', right_on='year_month', how='left'
     ).fillna(0)
 
+    # הערה (Sprint C1): is_routine הוסר. הוא היה בדיוק
+    # 1 - (is_war + is_military_op + is_ceasefire), כלומר collinearity
+    # מובנית עם שלושת הדגלים האחרים. Prophet היה משייט בקואפיציינטים שלא
+    # ניתנים לפירוש. עכשיו רק שלושת הדגלים העצמאיים.
     regressor_cols = ['is_war','is_military_op','is_ceasefire',
                       'jewish_holiday','is_summer_peak',
-                      'is_routine','is_black_friday']
+                      'is_black_friday']
 
     m = Prophet(yearly_seasonality=False, weekly_seasonality=False,
                 daily_seasonality=False, interval_width=0.8,
@@ -228,18 +253,18 @@ def _build_features(series: pd.Series, events_df: pd.DataFrame) -> pd.DataFrame:
     for i, ym in enumerate(yms):
         y, m    = int(ym[:4]), int(ym[5:7])
         ev_row  = ev.loc[ym] if ym in ev.index else pd.Series(dtype=float)
+        # הערה (Sprint C1): month/quarter/is_summer_peak/is_routine הוסרו.
+        # sin_month/cos_month מקודדים עונתיות חודשית באופן רציף.
+        # is_summer_peak (Jul/Aug) חופף עם sin/cos. is_routine היה
+        # collinear עם is_war/military_op/ceasefire.
         row = {
-            'month':          m,
-            'quarter':        (m - 1) // 3 + 1,
             'sin_month':      np.sin(2 * np.pi * m / 12),
             'cos_month':      np.cos(2 * np.pi * m / 12),
             'is_war':          float(ev_row.get('is_war', 0)),
             'is_military_op':  float(ev_row.get('is_military_op', 0)),
             'is_ceasefire':    float(ev_row.get('is_ceasefire', 0)),
             'jewish_holiday':  float(ev_row.get('jewish_holiday', 0)),
-            'is_summer_peak':  float(ev_row.get('is_summer_peak', 0)),
             'travel_num':      _travel_impact_num(ev_row.get('travel_impact','normal')),
-            'is_routine':      float(1 - min(1, float(ev_row.get('is_war',0)) + float(ev_row.get('is_military_op',0)) + float(ev_row.get('is_ceasefire',0)))),
             'is_black_friday': float(1 if m == 11 else 0),
             'lag1':           float(series.iloc[i-1]) if i > 0 else 0,
             'lag2':           float(series.iloc[i-2]) if i > 1 else 0,
@@ -261,10 +286,11 @@ def forecast_xgboost(series: pd.Series, horizon: int,
     ev_idx  = all_ev.drop_duplicates(subset='year_month', keep='last').set_index('year_month')
     months  = _future_months(series.index[-1], horizon)
 
-    feat_cols = ['month','quarter','sin_month','cos_month',
+    # פיצ'רים אחרי C1 cleanup (ראה הערה ב-_build_features).
+    feat_cols = ['sin_month','cos_month',
                  'is_war','is_military_op','is_ceasefire',
-                 'jewish_holiday','is_summer_peak','travel_num',
-                 'is_routine','is_black_friday',
+                 'jewish_holiday','travel_num',
+                 'is_black_friday',
                  'lag1','lag2','lag3','lag12','roll3_mean','roll6_mean']
 
     df_feat = _build_features(series, all_ev)
@@ -276,7 +302,7 @@ def forecast_xgboost(series: pd.Series, horizon: int,
                          random_state=42, verbosity=0)
     model.fit(X_train, y_train)
 
-    # חיזוי איטרטיבי — כל חודש מוסיף ל-series
+    # חיזוי איטרטיבי — כל חודש מוסיף ל-series. הסדר חייב להתאים ל-feat_cols.
     extended = list(series.values.astype(float))
     preds    = []
     for i, ym in enumerate(months):
@@ -284,15 +310,12 @@ def forecast_xgboost(series: pd.Series, horizon: int,
         n = len(extended)
         ev_row = ev_idx.loc[ym] if ym in ev_idx.index else pd.Series(dtype=float)
         row = [[
-            m, (m-1)//3+1,
             np.sin(2*np.pi*m/12), np.cos(2*np.pi*m/12),
             float(ev_row.get('is_war',0)),
             float(ev_row.get('is_military_op',0)),
             float(ev_row.get('is_ceasefire',0)),
             float(ev_row.get('jewish_holiday',0)),
-            float(ev_row.get('is_summer_peak',0)),
             _travel_impact_num(ev_row.get('travel_impact','normal')),
-            float(1 - min(1, float(ev_row.get('is_war',0)) + float(ev_row.get('is_military_op',0)) + float(ev_row.get('is_ceasefire',0)))),
             float(1 if m == 11 else 0),
             extended[-1], extended[-2] if n>1 else 0,
             extended[-3] if n>2 else 0,
@@ -304,9 +327,13 @@ def forecast_xgboost(series: pd.Series, horizon: int,
         preds.append(pred)
         extended.append(pred)
 
-    # רווח אמון פשוט — std של שגיאות אחרונות
+    # רווח אמון — std של שגיאות 12 חודשים אחרונים (rolling). std גלובלי
+    # על כל ה-train היה מתעלם מהעובדה שעונת השוק יכולה לעבור חוסר-יציבות
+    # פתאומי (מלחמה, COVID), שבו ה-noise החדש הרבה גדול יותר מההיסטוריה.
     train_preds = model.predict(X_train)
-    residual_std = float(np.std(y_train - train_preds))
+    residuals = y_train - train_preds
+    recent = residuals[-12:] if len(residuals) >= 12 else residuals
+    residual_std = float(np.std(recent)) if len(recent) > 0 else 0.0
     preds_arr = np.array(preds)
     return _result_df(months,
                       preds_arr,
@@ -389,19 +416,33 @@ def run_all_models(series: pd.Series, horizon: int,
     except Exception:
         _arima_fn, _prophet_fn, _xgboost_fn = forecast_arima, forecast_prophet, forecast_xgboost
 
-    _note("  מריץ ARIMA...")
-    results['arima']   = _arima_fn(series, horizon, events_df, context)
+    # כל מודל בנפרד עם try/except: כשל בודד לא ממוטט את כל הריצה.
+    # ARIMA כבר עוטף את עצמו ב-try (fallback ל-MA(6)), אבל Prophet/XGBoost
+    # היו זורקים ישר לקורא. עכשיו השלושה מטופלים אחיד.
+    model_errors: dict[str, str] = {}
 
-    _note("  מריץ Prophet...")
-    results['prophet'] = _prophet_fn(series, horizon, events_df, context)
+    def _run_model(name: str, fn):
+        try:
+            _note(f"  מריץ {name}...")
+            return fn(series, horizon, events_df, context)
+        except Exception as e:
+            logger.exception("%s failed in run_all_models", name)
+            model_errors[name] = f"{type(e).__name__}: {e}"
+            return None
 
-    _note("  מריץ XGBoost...")
-    results['xgboost'] = _xgboost_fn(series, horizon, events_df, context)
+    results['arima']   = _run_model('ARIMA', _arima_fn)
+    results['prophet'] = _run_model('Prophet', _prophet_fn)
+    results['xgboost'] = _run_model('XGBoost', _xgboost_fn)
 
-    # Newsvendor על ממוצע שלושת המודלים
-    combined = (results['arima']['forecast'].values +
-                results['prophet']['forecast'].values +
-                results['xgboost']['forecast'].values) / 3.0
+    if model_errors:
+        results['model_errors'] = model_errors
+
+    # Newsvendor — רק מהמודלים שהצליחו.
+    successful = [m for m in ('arima', 'prophet', 'xgboost')
+                  if results.get(m) is not None]
+    if not successful:
+        raise RuntimeError(f"כל המודלים נכשלו: {model_errors}")
+    combined = sum(results[m]['forecast'].values for m in successful) / len(successful)
     results['newsvendor'] = newsvendor_order(
         mean_demand=float(combined.sum()),
         std_demand=float(np.std(series.values[-12:]) * np.sqrt(horizon)),
