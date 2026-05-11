@@ -185,13 +185,50 @@ unreachable, but in normal operation the DB is the source of truth.
   against a local copy of production data. That's the tradeoff for internal
   tooling.
 
+## Nightly sync
+
+`nightly_sync.py` is the unattended job that keeps the local copy fresh.
+It pulls the rolling last 30 days of `DOCUMENTS_D` / `LOGFILE` from Priority
+(catches retroactive edits), refreshes `PARTBAL`, and downloads any new
+IAA monthly flight-traffic PDFs that have been published since the last run.
+Every run logs to `sync_runs` so the GUI status bar can show
+"נתונים נכון ל-{timestamp}".
+
+### Scheduling (Windows)
+
+```powershell
+# Run every night at 23:00. Replace the path with your install location.
+schtasks /create /TN "MemsiNightlySync" /SC DAILY /ST 23:00 ^
+    /TR "python.exe C:\path\to\priority_interface\nightly_sync.py" /F
+```
+
+### Scheduling (Linux/macOS)
+
+```cron
+0 23 * * * cd /path/to/priority_interface && /usr/bin/python3 nightly_sync.py
+```
+
+### Flags
+
+```
+python nightly_sync.py                  # full run (rolling 30d + PARTBAL + IAA)
+python nightly_sync.py --days 14        # smaller window
+python nightly_sync.py --skip-iaa       # skip IAA PDF fetch
+python nightly_sync.py --triggered-by manual   # label this run in sync_runs
+```
+
+Logs land in `~/.memsi/logs/nightly_YYYY-MM-DD.log`. The IAA PDF cache lives
+in `.iaa_pdfs/` (gitignored — re-downloads as needed).
+
 ## Maintenance
 
 * Logs filling up: `~/.memsi/logs/` is capped at 30 daily files.
 * DB growing: `cache_metadata` is the index of what's already cached. Old
   months can be removed via `clear_month_data` (not exposed in the UI).
-* Forecasts looking off after an `forecast_engine.py` change: delete
-  `forecast_models_cache/`. The old pickled outputs are tied to the previous
-  logic.
+* Forecasts looking off after an `forecast_engine.py` change: bump
+  `MODEL_VERSION` in `forecast_engine.py` — that invalidates the disk cache
+  automatically. (You can also delete `forecast_models_cache/` manually.)
 * New migration: drop a file into `migrations/` with a higher numeric prefix,
   run `python migrate.py`. `schema_version` ensures it doesn't run twice.
+* Stale sync runs: `SELECT * FROM sync_runs ORDER BY started_at DESC LIMIT 30`
+  shows recent runs and their `records_pulled`/`errors_count`.

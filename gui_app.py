@@ -87,6 +87,22 @@ class MainWindow(QMainWindow):
         footer_layout.addSpacing(16)
         footer_layout.addWidget(self._api_dot)
         footer_layout.addWidget(self._api_lbl)
+        footer_layout.addSpacing(16)
+        self._sync_lbl = QLabel("Sync: …")
+        self._sync_lbl.setStyleSheet("font-size:11px; color:#7f8c8d;")
+        footer_layout.addWidget(self._sync_lbl)
+        # כפתור "סנכרן עכשיו" — תמיד זמין, ל-force refresh ידני
+        from qtpy.QtWidgets import QPushButton
+        self._sync_now_btn = QPushButton("סנכרן עכשיו")
+        self._sync_now_btn.setStyleSheet(
+            "QPushButton{font-size:10px; padding:2px 8px; "
+            "background:#3498db; color:white; border:none; border-radius:3px;}"
+            "QPushButton:hover{background:#2980b9;}"
+            "QPushButton:disabled{background:#bdc3c7;}"
+        )
+        self._sync_now_btn.clicked.connect(self._trigger_manual_sync)
+        footer_layout.addSpacing(8)
+        footer_layout.addWidget(self._sync_now_btn)
         footer_layout.addStretch()
         credit = QLabel("נכתב על ידי ירון גנד עבור תמוז סחר")
         credit.setStyleSheet("font-size:11px; color:#7f8c8d;")
@@ -131,6 +147,95 @@ class MainWindow(QMainWindow):
         self._api_worker = HealthCheckWorker()
         self._api_worker.finished.connect(self._on_api_health)
         self._api_worker.start()
+
+        # status של ה-sync הלילי האחרון
+        self._refresh_sync_status()
+
+        # אוטו-סנכרון לפי עתיקות-הנתונים
+        self._maybe_auto_sync()
+
+    # ── סנכרון אוטומטי / ידני ──────────────────────────────
+    _SYNC_THRESHOLD_HOURS = 6           # מתחת לזה — לא קופץ
+    _SYNC_BIG_DIALOG_HOURS = 24         # מעל זה — דיאלוג מרכזי-חוסם
+
+    def _maybe_auto_sync(self):
+        """בודק כמה שעות עברו מהסנכרון האחרון. מחליט אם להריץ ובאיזה סגנון."""
+        try:
+            from sync_runs import get_latest_successful
+            from datetime import datetime, timezone
+            latest = get_latest_successful()
+            if latest is None:
+                # מעולם לא בוצע סנכרון — קופץ עם הדיאלוג הגדול
+                self._start_sync(big=True)
+                return
+            ts = latest['finished_at']
+            now = datetime.now(timezone.utc)
+            if ts.tzinfo is None:
+                # ts assumed local — convert. אבל אצלנו זה TIMESTAMPTZ אז יש tz.
+                ts = ts.replace(tzinfo=timezone.utc)
+            hours = (now - ts).total_seconds() / 3600.0
+            logger.info("auto_sync check: %.1f hours since last sync", hours)
+            if hours < self._SYNC_THRESHOLD_HOURS:
+                return  # טרי, אין צורך
+            self._start_sync(big=(hours >= self._SYNC_BIG_DIALOG_HOURS))
+        except Exception:
+            logger.exception("_maybe_auto_sync failed")
+
+    def _trigger_manual_sync(self):
+        """לחיצה על 'סנכרן עכשיו' — תמיד דיאלוג קטן."""
+        self._start_sync(big=False, triggered_by='manual')
+
+    def _start_sync(self, big: bool = False, triggered_by: str = 'app-startup'):
+        """מתחיל worker + דיאלוג."""
+        # מונע ריצה כפולה
+        if getattr(self, '_sync_worker', None) is not None and self._sync_worker.isRunning():
+            logger.info("sync already in progress, ignoring trigger")
+            return
+
+        from sync_worker import SyncWorker
+        from sync_dialog import BigSyncDialog, SmallSyncDialog
+
+        self._sync_worker = SyncWorker(triggered_by=triggered_by)
+        DialogCls = BigSyncDialog if big else SmallSyncDialog
+        self._sync_dialog = DialogCls(self, self._sync_worker)
+
+        # אחרי סיום — מרענן את ה-status-bar
+        self._sync_worker.finished_ok.connect(lambda _: self._refresh_sync_status())
+        self._sync_worker.finished_partial.connect(
+            lambda *_: self._refresh_sync_status())
+        # מנטרל את הכפתור בזמן הריצה
+        self._sync_now_btn.setEnabled(False)
+        self._sync_worker.finished.connect(
+            lambda: self._sync_now_btn.setEnabled(True))
+
+        self._sync_worker.start()
+        self._sync_dialog.show()
+
+    def _refresh_sync_status(self):
+        """קורא את הריצה האחרונה מ-sync_runs ומציג ב-status-bar."""
+        try:
+            from sync_runs import get_latest_successful
+            latest = get_latest_successful()
+            if latest is None:
+                self._sync_lbl.setText("Sync: לא בוצע סנכרון לילי עדיין")
+                self._sync_lbl.setStyleSheet("font-size:11px; color:#e67e22;")
+                return
+            ts = latest['finished_at']
+            ts_str = ts.strftime('%Y-%m-%d %H:%M') if hasattr(ts, 'strftime') else str(ts)
+            pulled = latest.get('records_pulled') or {}
+            self._sync_lbl.setText(
+                f"נתונים נכון ל-{ts_str} "
+                f"(docs={pulled.get('documents', '?')}, logs={pulled.get('logfile', '?')})"
+            )
+            self._sync_lbl.setStyleSheet("font-size:11px; color:#27ae60;")
+            self._sync_lbl.setToolTip(
+                f"run_id={latest['run_id']}, status={latest['status']}, "
+                f"duration={latest.get('duration_seconds', '?')}s"
+            )
+        except Exception as e:
+            logger.exception("refresh_sync_status failed")
+            self._sync_lbl.setText(f"Sync: שגיאה ({str(e)[:30]})")
+            self._sync_lbl.setStyleSheet("font-size:11px; color:#e74c3c;")
 
     def _on_api_health(self, ok, msg):
         self._set_status(self._api_dot, self._api_lbl, ok,

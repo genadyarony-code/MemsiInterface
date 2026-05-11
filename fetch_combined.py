@@ -89,8 +89,11 @@ def _fetch_odata_all(url: str, params: dict, progress=None) -> list:
     return all_records
 
 
+# הערה: CUSTDES *לא קיים* ב-Priority OData (אומת ב-probe ב-B1). הקוד הישן
+# של combine_data משתמש ב-doc.get('CUSTDES') שמחזיר None שקט, אבל ה-$select
+# של OData זורק HTTP 400 אם מבקשים שדה לא-קיים. לכן הוא מושמט פה.
 _DOCUMENTS_SELECT = (
-    'DOCNO,CURDATE,CUSTNAME,CUSTDES,CDES,DETAILS,'
+    'DOCNO,CURDATE,CUSTNAME,CDES,DETAILS,'
     'STATDES,OWNERLOGIN,BRANCHNAME,RETL_DETAILS1'
 )
 _LOGFILE_SELECT = 'LOGDOCNO,CURDATE,PARTNAME,TOPARTDES,TQUANT,UCOST,CUSTNAME'
