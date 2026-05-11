@@ -28,12 +28,23 @@ warnings.filterwarnings('ignore')
 
 def _extend_events(events_df: pd.DataFrame, last_ym: str,
                    horizon: int, context: dict) -> pd.DataFrame:
-    """מוסיף שורות עתידיות ל-events_df לפי context הנוכחי"""
+    """מוסיף שורות עתידיות ל-events_df לפי context הנוכחי.
+
+    אירועים היסטוריים שכבר מופיעים ב-events_df שומרים על ערכיהם המקוריים — שורות
+    עתידיות מסונפות רק לחודשים שאינם קיימים. זה קריטי ל-backtest: כש-train_end
+    נמצא בעבר, חלון ה-horizon של ה-backtest נופל על חודשים שיש להם נתוני-עבר
+    ב-events_df. בלי הסינון, ה-context-default היה דורס את העובדות ההיסטוריות
+    ופוגם ב-metrics.
+    """
+    existing_yms = (set(events_df['year_month'].astype(str))
+                    if 'year_month' in events_df.columns else set())
     rows = []
     cur = datetime.strptime(last_ym + "-01", "%Y-%m-%d")
     for _ in range(horizon):
         cur = (cur + relativedelta(months=1))
         ym  = cur.strftime("%Y-%m")
+        if ym in existing_yms:
+            continue  # לא לדרוס נתונים היסטוריים ב-events_df
         _w = int(context.get('is_war', 0))
         _o = int(context.get('is_military_op', 0))
         _c = int(context.get('is_ceasefire', 0))
@@ -50,6 +61,8 @@ def _extend_events(events_df: pd.DataFrame, last_ym: str,
             'is_routine':      int(not (_w or _o or _c)),
             'is_black_friday': int(cur.month == 11),
         })
+    if not rows:
+        return events_df
     future = pd.DataFrame(rows)
     return pd.concat([events_df, future], ignore_index=True)
 

@@ -1,17 +1,14 @@
 # -*- coding: utf-8 -*-
 import requests
 import pandas as pd
-import psycopg2
 from datetime import date
 from dateutil.relativedelta import relativedelta
-from db_config import DB_CONFIG
+from db_config import get_conn
 
 import os
-from pathlib import Path
-from dotenv import load_dotenv
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
-load_dotenv(Path(__file__).parent / '.env')
+# הערה: load_dotenv כבר רץ ב-db_config.py בעת import. אין צורך לקרוא לו שוב.
 
 AUTH_HEADER = os.environ['PRIORITY_AUTH_HEADER']
 _BASE_URL   = os.environ.get('PRIORITY_BASE_URL', 'https://priority.newcinema.co.il/odata/Priority/tabula.ini/ncinema')
@@ -34,20 +31,17 @@ SUPPLIER_NAMES = [
 def get_active_warehouses_from_db():
     """מחזיר רשימת מחסנים פעילים מהשלושה חודשים האחרונים שקיימים במסד הנתונים."""
     three_months_ago = (date.today() - relativedelta(months=3)).strftime('%Y-%m-%d')
-    conn = psycopg2.connect(**DB_CONFIG)
-    cursor = conn.cursor()
-    cursor.execute("""
-        SELECT DISTINCT branchname
-        FROM documents
-        WHERE curdate >= %s
-          AND branchname IS NOT NULL
-          AND branchname != ''
-        ORDER BY branchname
-    """, (three_months_ago,))
-    warehouses = [row[0] for row in cursor.fetchall()]
-    cursor.close()
-    conn.close()
-    return warehouses
+    with get_conn() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("""
+                SELECT DISTINCT branchname
+                FROM documents
+                WHERE curdate >= %s
+                  AND branchname IS NOT NULL
+                  AND branchname != ''
+                ORDER BY branchname
+            """, (three_months_ago,))
+            return [row[0] for row in cursor.fetchall()]
 
 def fetch_partbal_inventory(warehouse_filter=None, progress_callback=None):
     """

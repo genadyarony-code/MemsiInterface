@@ -12,7 +12,7 @@ env/
 
 # Sensitive config — use .env.example as template
 .env
-db_config.py
+.env.local
 
 # Build artifacts
 build/

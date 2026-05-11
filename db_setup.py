@@ -9,8 +9,7 @@ Usage:
     python db_setup.py
 """
 import sys
-import psycopg2
-from db_config import DB_CONFIG
+from db_config import get_conn
 from logger import logger
 
 # ── Cache tables (cache_manager.py) ──────────────────────────────────────────
@@ -118,39 +117,36 @@ def setup_db(verbose: bool = True) -> bool:
     מחזיר True אם הצליח, False רק אם החיבור ל-DB נכשל.
     """
     try:
-        conn = psycopg2.connect(**DB_CONFIG)
+        # שלב 1: טבלאות — חובה. autocommit=True כדי שניהול ה-DDL יישאר במידי.
+        with get_conn(autocommit=True) as conn:
+            with conn.cursor() as cur:
+                for name, sql in _TABLE_STATEMENTS:
+                    cur.execute(sql)
+                    if verbose:
+                        print(f"  ✓ {name}")
+            conn.commit()
 
-        # שלב 1: טבלאות — חובה
-        with conn.cursor() as cur:
-            for name, sql in _TABLE_STATEMENTS:
-                cur.execute(sql)
-                if verbose:
-                    print(f"  ✓ {name}")
-        conn.commit()
+            # שלב 2: unique index על logfile — אופציונלי (נכשל אם יש כפילויות)
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(_CREATE_LOGFILE_UNIQUE_IDX)
+                    conn.commit()
+                    if verbose:
+                        print("  ✓ logfile_uq_index")
+                except Exception as idx_err:
+                    conn.rollback()
+                    logger.warning("logfile unique index failed (duplicates exist) — deduplicating: %s", idx_err)
+                    if verbose:
+                        print("  ⚠ כפילויות ב-logfile — מנקה...")
+                    with conn.cursor() as cur2:
+                        cur2.execute(_DEDUP_LOGFILE)
+                        deleted = cur2.rowcount
+                        cur2.execute(_CREATE_LOGFILE_UNIQUE_IDX)
+                    conn.commit()
+                    logger.info("db_setup: deduped %d logfile rows, index created", deleted)
+                    if verbose:
+                        print(f"  ✓ logfile_uq_index (הוסרו {deleted} כפילויות)")
 
-        # שלב 2: unique index על logfile — אופציונלי (נכשל אם יש כפילויות)
-        with conn.cursor() as cur:
-            try:
-                cur.execute(_CREATE_LOGFILE_UNIQUE_IDX)
-                conn.commit()
-                if verbose:
-                    print("  ✓ logfile_uq_index")
-            except Exception as idx_err:
-                conn.rollback()
-                logger.warning("logfile unique index failed (duplicates exist) — deduplicating: %s", idx_err)
-                if verbose:
-                    print("  ⚠ כפילויות ב-logfile — מנקה...")
-                # מחיקת כפילויות ויצירה מחדש
-                with conn.cursor() as cur2:
-                    cur2.execute(_DEDUP_LOGFILE)
-                    deleted = cur2.rowcount
-                    cur2.execute(_CREATE_LOGFILE_UNIQUE_IDX)
-                conn.commit()
-                logger.info("db_setup: deduped %d logfile rows, index created", deleted)
-                if verbose:
-                    print(f"  ✓ logfile_uq_index (הוסרו {deleted} כפילויות)")
-
-        conn.close()
         logger.info("db_setup: all tables and indexes verified OK")
         if verbose:
             print("\nמסד הנתונים מוכן.")

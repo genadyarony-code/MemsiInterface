@@ -19,9 +19,8 @@ import sys
 import argparse
 import importlib.util
 from pathlib import Path
-import psycopg2
 
-from db_config import DB_CONFIG
+from db_config import get_conn
 from logger import logger
 
 MIGRATIONS_DIR = Path(__file__).parent / 'migrations'
@@ -81,8 +80,9 @@ def _record(conn, filename: str):
 
 
 def run_all(dry_run: bool = False) -> int:
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
+    # autocommit=True: migrate.py מנהל את ה-commit/rollback בעצמו פר-מיגרציה,
+    # כך שהוא לא ירוקלל אם אחת מצליחה ושנייה נכשלת.
+    with get_conn(autocommit=True) as conn:
         applied = _applied(conn)
         files = _list_migrations()
         pending = [f for f in files if f.name not in applied]
@@ -116,13 +116,10 @@ def run_all(dry_run: bool = False) -> int:
                 return 1
 
         return 0
-    finally:
-        conn.close()
 
 
 def show_status() -> int:
-    conn = psycopg2.connect(**DB_CONFIG)
-    try:
+    with get_conn(autocommit=True) as conn:
         applied = _applied(conn)
         files = _list_migrations()
         print(f"{len(applied)} applied, {len(files)} total\n")
@@ -135,8 +132,6 @@ def show_status() -> int:
             for u in sorted(unknown):
                 print(f"  ??  {u}")
         return 0
-    finally:
-        conn.close()
 
 
 def main():
