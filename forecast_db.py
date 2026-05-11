@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import pandas as pd
 import os
+from psycopg2.extras import execute_values
 from db_config import get_conn
 
 EVENTS_CSV = os.path.join(os.path.dirname(__file__), 'forecast_events.csv')
@@ -106,16 +107,22 @@ class ForecastDB:
                 """, (branch, luggage_type, year_month, quantity))
 
     def bulk_upsert_history(self, records: list[dict]):
-        """records: [{'branch','luggage_type','year_month','quantity'}]"""
+        """records: [{'branch','luggage_type','year_month','quantity'}].
+        משתמש ב-execute_values לבולק-אמיתי."""
+        if not records:
+            return
+        rows = [
+            (r['branch'], r['luggage_type'], r['year_month'], r['quantity'])
+            for r in records
+        ]
         with get_conn() as conn:
             with conn.cursor() as cur:
-                for r in records:
-                    cur.execute("""
-                        INSERT INTO forecast_history (branch, luggage_type, year_month, quantity)
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (branch, luggage_type, year_month)
-                        DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()
-                    """, (r['branch'], r['luggage_type'], r['year_month'], r['quantity']))
+                execute_values(cur, """
+                    INSERT INTO forecast_history (branch, luggage_type, year_month, quantity)
+                    VALUES %s
+                    ON CONFLICT (branch, luggage_type, year_month)
+                    DO UPDATE SET quantity = EXCLUDED.quantity, updated_at = NOW()
+                """, rows, page_size=500)
 
     def get_history(self, branches: list[str] | None = None,
                     luggage_types: list[str] | None = None) -> pd.DataFrame:

@@ -12,6 +12,7 @@ import json
 from typing import Callable
 import numpy as np
 import pandas as pd
+from psycopg2.extras import execute_values
 
 from db_config import get_conn
 from logger import logger
@@ -114,18 +115,14 @@ def save_run(branches: list[str], categories: list[str],
         ))
         run_id = cur.fetchone()[0]
 
-        # predictions
+        # predictions — bulk insert עם execute_values
+        pred_rows = []
         for model_name in ('arima', 'prophet', 'xgboost'):
             df = results.get(model_name)
             if df is None or df.empty:
                 continue
             for _, row in df.iterrows():
-                cur.execute("""
-                    INSERT INTO forecast_predictions
-                        (run_id, model, year_month, forecast, lower, upper)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (run_id, model, year_month) DO NOTHING
-                """, (
+                pred_rows.append((
                     run_id, model_name,
                     str(row['year_month']),
                     float(row['forecast']),
@@ -141,28 +138,35 @@ def save_run(branches: list[str], categories: list[str],
             avg_forecast = sum(results[m]['forecast'].values
                                for m in models_with_data) / len(models_with_data)
             for ym, val in zip(base['year_month'].tolist(), avg_forecast):
-                cur.execute("""
-                    INSERT INTO forecast_predictions
-                        (run_id, model, year_month, forecast)
-                    VALUES (%s, 'avg', %s, %s)
-                    ON CONFLICT (run_id, model, year_month) DO NOTHING
-                """, (run_id, str(ym), float(val)))
+                pred_rows.append((run_id, 'avg', str(ym), float(val), None, None))
 
-        # metrics
+        if pred_rows:
+            execute_values(cur, """
+                INSERT INTO forecast_predictions
+                    (run_id, model, year_month, forecast, lower, upper)
+                VALUES %s
+                ON CONFLICT (run_id, model, year_month) DO NOTHING
+            """, pred_rows)
+
+        # metrics — bulk insert
         if metrics:
-            for model_name, m in metrics.items():
-                cur.execute("""
-                    INSERT INTO forecast_metrics
-                        (run_id, model, test_n, mae, rmse, mape)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (run_id, model) DO NOTHING
-                """, (
+            metric_rows = [
+                (
                     run_id, model_name,
                     m.get('test_n'),
                     m.get('mae'),
                     m.get('rmse'),
                     m.get('mape'),
-                ))
+                )
+                for model_name, m in metrics.items()
+            ]
+            if metric_rows:
+                execute_values(cur, """
+                    INSERT INTO forecast_metrics
+                        (run_id, model, test_n, mae, rmse, mape)
+                    VALUES %s
+                    ON CONFLICT (run_id, model) DO NOTHING
+                """, metric_rows)
 
         conn.commit()
 

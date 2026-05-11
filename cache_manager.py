@@ -7,6 +7,7 @@
 import pandas as pd
 from datetime import datetime
 from dateutil.relativedelta import relativedelta
+from psycopg2.extras import execute_values
 from db_config import get_conn
 from logger import logger
 
@@ -35,64 +36,72 @@ class CacheManager:
                 return {row[0]: {'start': row[1], 'end': row[2]} for row in cursor.fetchall()}
 
     def save_documents(self, documents, year_month):
-        """שמירת מסמכים ב-cache"""
+        """שמירת מסמכים ב-cache (bulk insert עם execute_values)."""
         if not documents:
             return
 
+        rows = [
+            (
+                doc.get('DOCNO'),
+                doc.get('CURDATE'),
+                doc.get('CUSTNAME'),
+                doc.get('CUSTDES'),
+                doc.get('CDES'),
+                doc.get('DETAILS'),
+                doc.get('STATDES'),
+                doc.get('OWNERLOGIN'),
+                doc.get('BRANCHNAME'),
+                doc.get('RETL_DETAILS1'),
+            )
+            for doc in documents
+        ]
+
         with get_conn() as conn:
             with conn.cursor() as cursor:
-                for doc in documents:
-                    cursor.execute("""
-                        INSERT INTO documents (docno, curdate, custname, custdes, cdes, details,
-                                             statdes, ownerlogin, branchname, retl_details1)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT (docno) DO NOTHING
-                    """, (
-                        doc.get('DOCNO'),
-                        doc.get('CURDATE'),
-                        doc.get('CUSTNAME'),
-                        doc.get('CUSTDES'),
-                        doc.get('CDES'),
-                        doc.get('DETAILS'),
-                        doc.get('STATDES'),
-                        doc.get('OWNERLOGIN'),
-                        doc.get('BRANCHNAME'),
-                        doc.get('RETL_DETAILS1')
-                    ))
+                execute_values(cursor, """
+                    INSERT INTO documents (docno, curdate, custname, custdes, cdes, details,
+                                         statdes, ownerlogin, branchname, retl_details1)
+                    VALUES %s
+                    ON CONFLICT (docno) DO NOTHING
+                """, rows, page_size=500)
 
     def save_logfile(self, logfile_records, year_month):
-        """שמירת תנועות ב-cache.
+        """שמירת תנועות ב-cache (bulk insert עם execute_values).
         מדלג על שורות בלי LOGDOCNO (ה-unique index הוא partial WHERE logdocno IS NOT NULL).
         """
         if not logfile_records:
             return
 
+        rows = []
         skipped = 0
-        with get_conn() as conn:
-            with conn.cursor() as cursor:
-                for log in logfile_records:
-                    logdocno = log.get('LOGDOCNO')
-                    if logdocno is None or logdocno == '':
-                        skipped += 1
-                        continue
-                    # ה-WHERE כאן חייב להיות זהה ל-WHERE של ה-partial unique index
-                    # ב-db_setup.py (uq_logfile_row), אחרת PostgreSQL לא יזהה אותו ל-ON CONFLICT.
-                    cursor.execute("""
+        for log in logfile_records:
+            logdocno = log.get('LOGDOCNO')
+            if logdocno is None or logdocno == '':
+                skipped += 1
+                continue
+            rows.append((
+                logdocno,
+                log.get('CURDATE'),
+                log.get('PARTNAME'),
+                log.get('TOPARTDES'),
+                log.get('TQUANT'),
+                log.get('UCOST'),
+                log.get('CUSTNAME'),
+            ))
+
+        if rows:
+            # ה-WHERE כאן חייב להיות זהה ל-WHERE של ה-partial unique index
+            # (uq_logfile_row), אחרת PostgreSQL לא יזהה אותו ל-ON CONFLICT.
+            with get_conn() as conn:
+                with conn.cursor() as cursor:
+                    execute_values(cursor, """
                         INSERT INTO logfile (logdocno, curdate, partname, topartdes,
                                             tquant, ucost, custname)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        VALUES %s
                         ON CONFLICT (logdocno, partname, topartdes, tquant, ucost, curdate)
                           WHERE logdocno IS NOT NULL
                           DO NOTHING
-                    """, (
-                        logdocno,
-                        log.get('CURDATE'),
-                        log.get('PARTNAME'),
-                        log.get('TOPARTDES'),
-                        log.get('TQUANT'),
-                        log.get('UCOST'),
-                        log.get('CUSTNAME')
-                    ))
+                    """, rows, page_size=500)
 
         if skipped:
             logger.info("save_logfile: skipped %d rows with null LOGDOCNO", skipped)

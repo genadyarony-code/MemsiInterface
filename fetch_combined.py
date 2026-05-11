@@ -89,10 +89,18 @@ def _fetch_odata_all(url: str, params: dict, progress=None) -> list:
     return all_records
 
 
+_DOCUMENTS_SELECT = (
+    'DOCNO,CURDATE,CUSTNAME,CUSTDES,CDES,DETAILS,'
+    'STATDES,OWNERLOGIN,BRANCHNAME,RETL_DETAILS1'
+)
+_LOGFILE_SELECT = 'LOGDOCNO,CURDATE,PARTNAME,TOPARTDES,TQUANT,UCOST,CUSTNAME'
+
+
 def fetch_documents(start_date, end_date, progress=None):
     customer_filter = ' or '.join([f"CUSTNAME eq '{c}'" for c in _target_customers()])
     params = {
-        '$filter': f"(CURDATE ge {start_date}T00:00:00Z and CURDATE le {end_date}T23:59:59Z) and ({customer_filter})"
+        '$filter': f"(CURDATE ge {start_date}T00:00:00Z and CURDATE le {end_date}T23:59:59Z) and ({customer_filter})",
+        '$select': _DOCUMENTS_SELECT,
     }
     records = _fetch_odata_all(DOCUMENTS_URL, params, progress=progress)
     logger.info("fetch_documents %s→%s: %d records", start_date, end_date, len(records))
@@ -102,7 +110,8 @@ def fetch_documents(start_date, end_date, progress=None):
 def fetch_logfile(start_date, end_date, progress=None):
     customer_filter = ' or '.join([f"CUSTNAME eq '{c}'" for c in _target_customers()])
     params = {
-        '$filter': f"(CURDATE ge {start_date}T00:00:00Z and CURDATE le {end_date}T23:59:59Z) and ({customer_filter})"
+        '$filter': f"(CURDATE ge {start_date}T00:00:00Z and CURDATE le {end_date}T23:59:59Z) and ({customer_filter})",
+        '$select': _LOGFILE_SELECT,
     }
     records = _fetch_odata_all(LOGFILE_URL, params, progress=progress)
     logger.info("fetch_logfile %s→%s: %d records", start_date, end_date, len(records))
@@ -181,27 +190,55 @@ def combine_data(documents, logfile_records):
     if log_df.empty:
         return docs_df
     combined = docs_df.merge(log_df, on='תעודה', how='inner')
-    
-    # הוספת עמודות סוג פעולה, זיהוי מחוודה וחיוב ללקוח
-    combined['זיהוי מזוודה'] = combined.apply(
-        lambda row: identify_luggage(row['תיאור מוצר']), axis=1
-    )
-    
-    # קביעת סוג פעולה וחיוב
-    def calculate_operation_and_charge(row):
-        if is_repair_item(row['מקט']):
-            repair_price = get_repair_price(row['מספר לקוח'], row['מקט'])
-            return 'תיקון', repair_price * row['כמות'] if repair_price else None
-        elif row['זיהוי מזוודה']:
-            replacement_price = get_replacement_price(row['מספר לקוח'], row['זיהוי מזוודה'])
-            return 'החלפה', replacement_price * row['כמות'] if replacement_price else None
+
+    # זיהוי מזוודה ב-vectorized fashion: בונים lookup-dict לתיאורים ייחודיים
+    # ואז .map. במקום ~100K קריאות פייתון, מבצעים ~unique-count.
+    unique_descs = combined['תיאור מוצר'].dropna().unique()
+    luggage_lookup = {d: identify_luggage(d) for d in unique_descs}
+    combined['זיהוי מזוודה'] = combined['תיאור מוצר'].map(luggage_lookup)
+
+    # is_repair_item תלוי רק במק"ט — pre-compute lookup על מק"טים ייחודיים.
+    unique_skus = combined['מקט'].dropna().unique()
+    is_repair_lookup = {sku: is_repair_item(sku) for sku in unique_skus}
+
+    # מחירים תלויים ב-(לקוח, מק"ט) או (לקוח, זיהוי). pre-compute רק על
+    # הקומבינציות שמופיעות בפועל — חוסך הרבה קריאות DB מיותרות.
+    repair_pairs = combined.loc[
+        combined['מקט'].map(is_repair_lookup).fillna(False),
+        ['מספר לקוח', 'מקט']
+    ].drop_duplicates().itertuples(index=False, name=None)
+    repair_price_lookup = {
+        (cust, sku): get_repair_price(cust, sku) for cust, sku in repair_pairs
+    }
+
+    replacement_pairs = combined.loc[
+        combined['זיהוי מזוודה'].notna(),
+        ['מספר לקוח', 'זיהוי מזוודה']
+    ].drop_duplicates().itertuples(index=False, name=None)
+    replacement_price_lookup = {
+        (cust, lug): get_replacement_price(cust, lug) for cust, lug in replacement_pairs
+    }
+
+    def _operation_and_charge(row):
+        sku = row['מקט']
+        qty = row['כמות']
+        cust = row['מספר לקוח']
+        if is_repair_lookup.get(sku):
+            price = repair_price_lookup.get((cust, sku))
+            return 'תיקון', (price * qty) if price else None
+        lug = row['זיהוי מזוודה']
+        if lug:
+            price = replacement_price_lookup.get((cust, lug))
+            return 'החלפה', (price * qty) if price else None
         return '', None
-    
+
+    # ה-apply הזה לא יוצא מ-O(n) מכיוון שהוא רק לוקח dict-lookups; אין יותר
+    # מאות-אלפי קריאות-פייתון/DB בתוכו.
     combined[['סוג פעולה', 'חיוב ללקוח']] = combined.apply(
-        lambda row: pd.Series(calculate_operation_and_charge(row)), axis=1
+        lambda row: pd.Series(_operation_and_charge(row)), axis=1
     )
-    
+
     # הסרת עמודת עזר
     combined = combined.drop('מספר לקוח_log', axis=1)
-    
+
     return combined
