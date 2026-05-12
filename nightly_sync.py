@@ -136,6 +136,19 @@ def sync_iaa(lg: logging.Logger) -> dict:
     }
 
 
+def sync_flight_schedule(lg: logging.Logger) -> dict:
+    """מושך תוכניות-טיסה עתידיות מ-IAA flight-board."""
+    from flight_schedule_scraper import scrape_months
+    lg.info("sync_flight_schedule: starting (12 months ahead)")
+    res = scrape_months(months_ahead=12, lg=lg)
+    lg.info("sync_flight_schedule done: %s", res)
+    return {
+        'schedule_records':       res.get('records', 0),
+        'schedule_total_flights': res.get('total_flights', 0),
+        'schedule_failures':      res.get('failures', 0),
+    }
+
+
 # ────────────────────────────────────────────────
 #  Orchestration עם sync_runs tracking
 # ────────────────────────────────────────────────
@@ -165,7 +178,8 @@ def run_full(days: int = 30, skip_iaa: bool = False,
     _step('priority_rolling', sync_priority_rolling, days=days, lg=lg)
     _step('partbal',          sync_partbal,          lg=lg)
     if not skip_iaa:
-        _step('iaa',          sync_iaa,              lg=lg)
+        _step('iaa',              sync_iaa,              lg=lg)
+        _step('flight_schedule',  sync_flight_schedule,  lg=lg)
 
     if not errors:
         status, exit_code = 'ok', 0

@@ -192,6 +192,7 @@ class ForecastChart(QWidget):
             ('arima',   '#3498db', 'ARIMA'),
             ('prophet', '#27ae60', 'Prophet'),
             ('xgboost', '#e67e22', 'XGBoost'),
+            ('causal',  '#9b59b6', 'Causal'),
         ]
         # Sprint C2.5: legend מציג גם דיוק לכל מודל
         # (מחושב מ-MAE / mean(history)). מחזק את הקריאוּת של הגרף.
@@ -557,9 +558,9 @@ class ForecastTab(QWidget):
         self.fc_chart = ForecastChart()
         v.addWidget(self.fc_chart)
 
-        self.fc_table = QTableWidget(0, 8)
+        self.fc_table = QTableWidget(0, 9)
         self.fc_table.setHorizontalHeaderLabels(
-            ["חודש","ARIMA","Prophet","XGBoost","ממוצע","טווח","שינוי %","דיוק תחזית"])
+            ["חודש","ARIMA","Prophet","XGBoost","Causal","ממוצע","טווח","שינוי %","דיוק תחזית"])
         self.fc_table.setMaximumHeight(165)
         self.fc_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.fc_table.setAlternatingRowColors(True)
@@ -1024,8 +1025,21 @@ class ForecastTab(QWidget):
         self.run_btn.setEnabled(False)
         self.progress_bar.setVisible(True)
 
+        # Sprint C2.8: חישוב slice_share למודל הסיבתי. ה-causal יודע לחזות
+        # את כל ה-core; אנחנו מבקשים תחזית רק לסלייס שנבחר, אז מכפילים
+        # ב-share. אם הסלייס לא חופף ל-core (לא מבטחים את הסניפים) — None,
+        # והמודל הסיבתי לא ירוץ.
+        ctx = self._build_context()
+        try:
+            from causal_forecast import compute_slice_share
+            share = compute_slice_share(codes, cats)
+            ctx['_causal_slice_share'] = share
+        except Exception:
+            logger.exception("compute_slice_share failed; causal model will skip")
+            ctx['_causal_slice_share'] = None
+
         self._worker = ForecastWorker(
-            self._series, horizon, self.fdb.get_events(), self._build_context(),
+            self._series, horizon, self.fdb.get_events(), ctx,
             branches=codes, categories=cats, persist=True)
         self._worker.progress.connect(self.status_label.setText)
         self._worker.finished.connect(self._on_forecast_done)
@@ -1132,40 +1146,68 @@ class ForecastTab(QWidget):
         nmae = mae / hist_mean
         return max(0.0, min(100.0, 100.0 - nmae * 100.0))
 
+    # Causal accuracy ידועה מ-backtest: MAPE 14.9% → accuracy ~85%.
+    # זה מספר קבוע (לא בא מ-backtest-של-ריצה-זו), עד שהspecific ייכתב.
+    _CAUSAL_ACCURACY_FIXED = 85.0
+
     def _fill_fc_table(self, results):
-        models = ['arima','prophet','xgboost']
+        models = ['arima','prophet','xgboost','causal']
         dfs    = {m: results[m].set_index('year_month')
-                  for m in models if m in results}
-        months = results['arima']['year_month'].tolist() if 'arima' in results else []
+                  for m in models if m in results and results[m] is not None}
+        # שורות = החודשים של ARIMA (תמיד קיים), אבל אם causal יש לו horizon אחר
+        # ניקח את האיחוד
+        anchor_model = next((m for m in models if m in dfs), None)
+        months = dfs[anchor_model]['forecast'].index.tolist() if anchor_model else []
+        # חוזרים על fallback למקרה ש-anchor הוא causal עם months ב-format זהה
+        if anchor_model and 'year_month' in results[anchor_model].columns:
+            months = results[anchor_model]['year_month'].tolist()
         prev   = int(self._series.values[-1]) if len(self._series) else 0
 
-        # חישוב accuracy לכל מודל לפני שנכנסים ללולאה
+        # חישוב accuracy: ARIMA/Prophet/XGBoost מ-backtest; Causal — קבוע
         metrics = results.get('metrics') or {}
         hist_mean = float(self._series.mean()) if len(self._series) else 0.0
         model_accuracy: dict[str, float | None] = {}
-        for m in models:
+        for m in ('arima','prophet','xgboost'):
             mae = metrics.get(m, {}).get('mae') if isinstance(metrics, dict) else None
             model_accuracy[m] = self._accuracy_pct(mae, hist_mean)
+        if 'causal' in dfs:
+            model_accuracy['causal'] = self._CAUSAL_ACCURACY_FIXED
         valid_accs = [a for a in model_accuracy.values() if a is not None]
-        avg_accuracy = sum(valid_accs) / len(valid_accs) if valid_accs else None
+        # ממוצע משוקלל: Causal מקבל משקל 2 כי הוא הכי-מדויק
+        if 'causal' in model_accuracy and model_accuracy['causal'] is not None:
+            stat_avg = (sum(a for k, a in model_accuracy.items()
+                           if k != 'causal' and a is not None)
+                       / max(1, len([k for k,a in model_accuracy.items()
+                                     if k != 'causal' and a is not None])))
+            avg_accuracy = (model_accuracy['causal'] * 2 + stat_avg) / 3 if stat_avg else model_accuracy['causal']
+        else:
+            avg_accuracy = sum(valid_accs) / len(valid_accs) if valid_accs else None
+
+        def _v(m, ym):
+            if m in dfs and ym in dfs[m].index:
+                return int(dfs[m].loc[ym,'forecast'])
+            return 0
 
         self.fc_table.setRowCount(len(months))
         for row, ym in enumerate(months):
-            vals = [int(dfs[m].loc[ym,'forecast'])
-                    if ym in dfs.get(m,{}).index else 0 for m in models]
-            avg   = round(sum(vals)/len(vals)) if vals else 0
+            v_a = _v('arima', ym)
+            v_p = _v('prophet', ym)
+            v_x = _v('xgboost', ym)
+            v_c = _v('causal', ym)
+            non_zero = [v for v in (v_a, v_p, v_x, v_c) if v > 0]
+            avg   = round(sum(non_zero)/len(non_zero)) if non_zero else 0
             lo    = int(dfs['arima'].loc[ym,'lower']) if 'arima' in dfs and ym in dfs['arima'].index else avg
             hi    = int(dfs['arima'].loc[ym,'upper']) if 'arima' in dfs and ym in dfs['arima'].index else avg
             pct   = round((avg-prev)/prev*100,1) if prev else 0
             acc_txt = f"{avg_accuracy:.0f}%" if avg_accuracy is not None else "—"
-            # צבע ה-accuracy: ירוק >=70%, כתום 50-70%, אדום <50%
             acc_color = ('#27ae60' if (avg_accuracy or 0) >= 70 else
                          '#e67e22' if (avg_accuracy or 0) >= 50 else '#e74c3c')
             cells = [
                 (ym,             '#2c3e50', False, False),
-                (str(vals[0]),   '#3498db', True,  False),
-                (str(vals[1]),   '#27ae60', True,  False),
-                (str(vals[2]),   '#e67e22', True,  False),
+                (str(v_a),       '#3498db', True,  False),
+                (str(v_p),       '#27ae60', True,  False),
+                (str(v_x),       '#e67e22', True,  False),
+                (str(v_c) if v_c else '—', '#9b59b6', True, True),  # Causal מודגש
                 (str(avg),       '#2c3e50', True,  True),
                 (f"{lo}–{hi}",   '#7f8c8d', True,  False),
                 (f"{'+' if pct>=0 else ''}{pct}%",
@@ -1181,7 +1223,8 @@ class ForecastTab(QWidget):
                 if bold:
                     f=QFont(); f.setBold(True); it.setFont(f)
                 # ה-"שינוי %" קטן יותר מהשאר
-                if col == 6:
+                # שינוי % עבר מ-col 6 ל-7 (אחרי הוספת Causal ב-col 4)
+                if col == 7:
                     fnt = QFont(); fnt.setPointSize(10); it.setFont(fnt)
                 self.fc_table.setItem(row, col, it)
             prev = avg

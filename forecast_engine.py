@@ -40,7 +40,8 @@ MODEL_VERSION = "3"
 # ────────────────────────────────────────────────
 #  Cache להעשרת features מ-DB (flight_traffic + conversion_regime)
 # ────────────────────────────────────────────────
-_flight_cache: dict[str, float] = {}
+_flight_cache: dict[str, float] = {}             # היסטוריה: arriving_passengers
+_schedule_cache: dict[str, int] = {}              # עתיד: planned_flights (TOTAL)
 _regime_cache: dict[str, str] = {}
 _features_cache_loaded: bool = False
 
@@ -49,13 +50,10 @@ _REGIME_TO_NUM = {'LOW': 0.0, 'MEDIUM': 1.0, 'HIGH': 2.0}
 
 
 def _load_features_cache() -> None:
-    """טוען פעם אחת את flight_traffic + conversion_regime מ-DB. cache בזיכרון
-    כי הנתונים האלה משתנים רק פעם בחודש (אחרי IAA sync).
-
-    נשמר ברמת המודול כדי שגם cells מרובים באותה ריצה ישתמשו באותו נתון.
-    invalidate() מתבצע על-ידי בדיקת אם flight_traffic.year_month האחרון השתנה.
+    """טוען פעם אחת את flight_traffic + flight_schedule + conversion_regime
+    מ-DB. cache בזיכרון כי הנתונים משתנים רק פעם בחודש (אחרי nightly_sync).
     """
-    global _flight_cache, _regime_cache, _features_cache_loaded
+    global _flight_cache, _schedule_cache, _regime_cache, _features_cache_loaded
     if _features_cache_loaded:
         return
     try:
@@ -69,19 +67,26 @@ def _load_features_cache() -> None:
                 """)
                 _flight_cache = {ym: float(v) for ym, v in cur.fetchall()}
                 cur.execute("""
+                    SELECT year_month, planned_flights
+                    FROM flight_schedule
+                    WHERE airline_code = 'TOTAL'
+                """)
+                _schedule_cache = {ym: int(n) for ym, n in cur.fetchall()}
+                cur.execute("""
                     SELECT year_month, conversion_regime
                     FROM forecast_events
                     WHERE conversion_regime IS NOT NULL
                 """)
                 _regime_cache = {ym: r for ym, r in cur.fetchall()}
         _features_cache_loaded = True
-        logger.info("features cache loaded: flights=%d, regimes=%d",
-                    len(_flight_cache), len(_regime_cache))
+        logger.info("features cache loaded: flights=%d, schedule=%d, regimes=%d",
+                    len(_flight_cache), len(_schedule_cache), len(_regime_cache))
     except Exception:
         logger.exception("failed to load features cache; falling back to defaults")
         _flight_cache = {}
+        _schedule_cache = {}
         _regime_cache = {}
-        _features_cache_loaded = True  # לא לנסות שוב לכל cell
+        _features_cache_loaded = True
 
 
 def invalidate_features_cache() -> None:
@@ -564,6 +569,26 @@ def run_all_models(series: pd.Series, horizon: int,
     results['prophet'] = _run_model('Prophet', _prophet_fn)
     results['xgboost'] = _run_model('XGBoost', _xgboost_fn)
 
+    # Sprint C2.8: מודל סיבתי מבוסס-נוסחה. לא תלוי ב-series; קורא ישירות
+    # מ-flight_schedule/flight_traffic ומ-breakage_rate. MAPE 14.9% ב-backtest.
+    # ה-slice_share מועבר מ-UI דרך context — מתאר איזה אחוז של ה-core
+    # הסלייס-הנבחר מייצג. אם None, ה-causal לא רץ.
+    try:
+        from causal_forecast import forecast_causal
+        slice_share = (context or {}).get('_causal_slice_share')
+        if slice_share is not None:
+            _note("  מריץ Causal...")
+            results['causal'] = forecast_causal(
+                series, horizon, events_df, context,
+                slice_share=slice_share,
+            )
+        else:
+            results['causal'] = None
+    except Exception as e:
+        logger.exception("Causal failed in run_all_models")
+        model_errors['causal'] = f"{type(e).__name__}: {e}"
+        results['causal'] = None
+
     if model_errors:
         results['model_errors'] = model_errors
 
@@ -578,10 +603,12 @@ def run_all_models(series: pd.Series, horizon: int,
         std_demand=float(np.std(series.values[-12:]) * np.sqrt(horizon)),
     )
 
+    from causal_forecast import CAUSAL_DESCRIPTION
     results['descriptions'] = {
         'arima':      ARIMA_DESCRIPTION,
         'prophet':    PROPHET_DESCRIPTION,
         'xgboost':    XGBOOST_DESCRIPTION,
+        'causal':     CAUSAL_DESCRIPTION,
         'newsvendor': NEWSVENDOR_DESCRIPTION,
     }
     return results
