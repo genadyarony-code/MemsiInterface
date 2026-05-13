@@ -35,6 +35,40 @@ warnings.filterwarnings('ignore', message='pandas only supports SQLAlchemy')
 
 
 # ============================================================
+#  סדר היררכי להצגת הטבלה: גודל → מותג → חומר
+# ============================================================
+_SIZE_ORDER = ['טרולי', 'עליה', 'קטנה', 'בינונית', 'גדולה', 'ענקית']
+_BRAND_ORDER = ['קלאסית', 'מותג על', 'מותג']
+_MATERIAL_ORDER = ['רכה', 'קשיחה', 'בד']
+
+
+def _category_sort_key(cat: str) -> tuple[int, int, int, str]:
+    """Sort key: (size_rank, brand_rank, material_rank, raw_string)."""
+    if not cat:
+        return (99, 99, 99, '')
+
+    size_rank = 99
+    for i, s in enumerate(_SIZE_ORDER):
+        if cat.startswith(s + ' '):
+            size_rank = i
+            break
+
+    brand_rank = 99
+    for i, b in enumerate(_BRAND_ORDER):
+        if (' ' + b + ' ') in (' ' + cat + ' '):
+            brand_rank = i
+            break
+
+    material_rank = 99
+    for i, m in enumerate(_MATERIAL_ORDER):
+        if cat.endswith(' ' + m) or cat == m:
+            material_rank = i
+            break
+
+    return (size_rank, brand_rank, material_rank, cat)
+
+
+# ============================================================
 #  Eligible branches
 # ============================================================
 def _eligible_warehouses() -> list[str]:
@@ -263,7 +297,11 @@ def compute_min_stock(lead_time_days: int = 7,
             'gap': round(current - recommended_min, 1),
         })
 
-    return pd.DataFrame(agg).sort_values(['branch', 'gap'], ascending=[True, True])
+    out = pd.DataFrame(agg)
+    out['_cat_key'] = out['category'].map(_category_sort_key)
+    out = out.sort_values(['branch', '_cat_key'], ascending=[True, True])
+    out = out.drop(columns=['_cat_key']).reset_index(drop=True)
+    return out
 
 
 if __name__ == '__main__':

@@ -113,9 +113,30 @@ class MinStockTab(QWidget):
         self.table.setColumnCount(9)
         self.table.setHorizontalHeaderLabels([
             "סניף", "שם סניף", "קטגוריה",
-            "קצב 1ח", "קצב 3ח", "קצב 12ח",
+            "קצב לחודש", "קצב לשלושה חודשים", "קצב ל-12 חודשים",
             "מלאי נוכחי", "מומלץ מינימום", "פער",
         ])
+        # תצוגה אסתטית יותר — שורות גבוהות, header גדול, רווחים נוחים
+        self.table.setStyleSheet("""
+            QTableWidget {
+                gridline-color: #d0d0d0;
+                font-size: 12px;
+            }
+            QHeaderView::section {
+                background-color: #34495e;
+                color: white;
+                padding: 8px 10px;
+                font-weight: bold;
+                font-size: 12px;
+                border: none;
+                border-right: 1px solid #2c3e50;
+            }
+            QTableWidget::item {
+                padding: 6px 10px;
+            }
+        """)
+        self.table.verticalHeader().setDefaultSectionSize(28)
+        self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
         self.table.horizontalHeader().setStretchLastSection(False)
         self.table.setSortingEnabled(True)
@@ -162,6 +183,11 @@ class MinStockTab(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(df))
 
+        # rate הוא יחידות-ליום. ערך תחת 1 — מציג "<1" כי הקצב פחות
+        # ממזוודה אחת ליום (לעיתים קרובות שברים נמוכים מאוד).
+        def _fmt_rate(r: float) -> str:
+            return "<1" if r < 1 else f"{r:.2f}"
+
         for i, (_, row) in enumerate(df.iterrows()):
             branch = str(row['branch'])
             branch_name = get_branch_name(branch) or ''
@@ -170,29 +196,32 @@ class MinStockTab(QWidget):
                 branch,
                 branch_name,
                 row['category'] or '',
-                f"{row['rate_1m']:.3f}",
-                f"{row['rate_3m']:.3f}",
-                f"{row['rate_12m']:.3f}",
-                f"{row['current_stock']:.1f}",
+                _fmt_rate(row['rate_1m']),
+                _fmt_rate(row['rate_3m']),
+                _fmt_rate(row['rate_12m']),
+                f"{row['current_stock']:.0f}",
                 str(row['recommended_min']),
-                f"{row['gap']:.1f}",
+                f"{row['gap']:+.0f}",
             ]
             for j, val in enumerate(cells):
                 item = QTableWidgetItem(val)
-                # Right-align numeric columns
                 if j >= 3:
-                    item.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
-                # Color the "gap" column: red if negative, green if positive
+                    item.setTextAlignment(Qt.AlignCenter)
                 if j == 8:
                     gap = float(row['gap'])
                     if gap < 0:
                         item.setForeground(QBrush(QColor(200, 0, 0)))
-                        item.setData(Qt.UserRole, gap)  # for sorting
                     elif gap > 5:
                         item.setForeground(QBrush(QColor(0, 130, 0)))
                 self.table.setItem(i, j, item)
 
         self.table.resizeColumnsToContents()
+        # רוחב מינימלי לעמודות "קצב" (3 כותרות-עברית ארוכות)
+        for col in [3, 4, 5]:
+            current = self.table.columnWidth(col)
+            self.table.setColumnWidth(col, max(current, 140))
+        # קטגוריה רחבה במיוחד
+        self.table.setColumnWidth(2, max(self.table.columnWidth(2), 200))
         self.table.setSortingEnabled(True)
 
     def _on_export(self):
