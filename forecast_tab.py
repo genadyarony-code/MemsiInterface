@@ -209,6 +209,9 @@ class ForecastChart(QWidget):
         for key, col, lbl in MODEL_CFG:
             if key not in results: continue
             df = results[key]
+            # מודל שנכשל מוחזר כ-None — מדלגים כדי לא לקרוס ב-len(None).
+            if df is None or len(df) == 0:
+                continue
             fx = list(range(base, base + len(df)))
             cx = [hx[-1]] + fx
             cy = [float(history.values[-1])] + df['forecast'].tolist()
@@ -218,8 +221,9 @@ class ForecastChart(QWidget):
             ax.fill_between(fx, df['lower'], df['upper'], color=col, alpha=0.10)
             ax.scatter(fx, df['forecast'], color=col, s=28, zorder=6, alpha=0.85)
 
+        arima_df = results.get('arima')
         all_m = list(history.index) + (
-            results['arima']['year_month'].tolist() if 'arima' in results else [])
+            arima_df['year_month'].tolist() if arima_df is not None else [])
         step  = max(1, len(all_m) // 14)
         ax.set_xticks(range(0, len(all_m), step))
         ax.set_xticklabels([all_m[i] for i in range(0, len(all_m), step)],
@@ -938,9 +942,11 @@ class ForecastTab(QWidget):
 
     def _fill_snap_fc_table(self, results: dict, series: pd.Series):
         models = ['arima','prophet','xgboost']
+        # סינון מודלים שהוחזרו כ-None (כשלון במודל-יחיד) — אחרת ה-.set_index קורס.
         dfs    = {m: results[m].set_index('year_month')
-                  for m in models if m in results}
-        months = results['arima']['year_month'].tolist() if 'arima' in results else []
+                  for m in models if m in results and results[m] is not None}
+        months = (dfs['arima'].index.tolist() if 'arima' in dfs
+                  else (next(iter(dfs.values())).index.tolist() if dfs else []))
         prev   = int(series.values[-1]) if len(series) else 0
         t      = self.snap_fc_table
         t.setRowCount(len(months))
