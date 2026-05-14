@@ -140,6 +140,13 @@ Safe to re-run; it checks `schema_version` and skips what already ran.
 `cache_metadata`) through `db_setup.py` on every launch. That's idempotent
 and harmless if the tables already exist.
 
+> **First-run note.** The first time `nightly_sync.py` runs after install, it
+> performs an `initial_sync` of `logfile_full` — pulling the full historical
+> LOGFILE for every active SKU. This takes roughly **12 minutes for ~1,400
+> SKUs** and runs automatically; no flag needed. Every subsequent night only
+> the `incremental_sync` (rolling last 30 days) runs, and finishes in
+> seconds.
+
 ## Dependencies
 
 ```
@@ -201,6 +208,13 @@ Every run logs to `sync_runs` so the GUI status bar can show
 schtasks /create /TN "MemsiNightlySync" /SC DAILY /ST 23:00 ^
     /TR "python.exe C:\path\to\priority_interface\nightly_sync.py" /F
 ```
+
+> **Bundle case (TODO).** `nightly_sync.py` currently has no `__main__` entry
+> point in the PyInstaller spec, so the bundled `PriorityInterface.exe` cannot
+> run the nightly job. Users running from a bundle still need a Python
+> interpreter + checkout for nightly sync. A future change can either add a
+> second `EXE()` target (e.g. `nightly_sync.exe`) or wire a `--nightly-sync`
+> flag into `gui_app.py`.
 
 ### Scheduling (Linux/macOS)
 

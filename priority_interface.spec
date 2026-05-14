@@ -6,7 +6,14 @@ a = Analysis(
     ['gui_app.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    # קבצי נתונים שצריכים להישאר ליד ה-exe.
+    # .iaa_pdfs/ ו-forecast_models_cache/ לא נכללים בכוונה — אלה תיקיות
+    # runtime-write שנוצרות בריצה הראשונה דרך mkdir(exist_ok=True),
+    # ו-PyInstaller's _MEIPASS תיקייה זמנית והמשתמש בלאו הכי לא יכול לכתוב לתוכה.
+    datas=[
+        ('iaa_flight_data.csv', '.'),
+        ('migrations', 'migrations'),
+    ],
     hiddenimports=[
         'psycopg2',
         'psycopg2.extensions',
